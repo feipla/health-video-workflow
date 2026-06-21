@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import urllib.request
 import urllib.error
+import queue
+import threading
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -677,29 +679,13 @@ class VideoWorkflow:
 
 # ============ Gradio Web 界面 ============
 
-def run_workflow_ui(video_url, tts_voice, proxy_url=""):
-    """Gradio 接口: 运行工作流并返回日志和结果"""
-    if not video_url or not video_url.strip():
-        yield ["请输入 YouTube 视频链接", None, None, None, None]
-        return
-
-    video_url = video_url.strip()
-    proxy_url = proxy_url.strip()
-    logs = []
+def _build_outputs(log_text, workflow, video_id):
+    """从 workflow 状态构建输出元组"""
     script_content = ""
     video_path = None
     audio_path = None
-    video_id = extract_video_id(video_url)
 
-    def emit(msg):
-        logs.append(msg)
-        return "\n".join(logs)
-
-    workflow = VideoWorkflow(video_url, tts_voice)
-    if proxy_url:
-        workflow.proxy = proxy_url
-
-    for _ in workflow.run(emit):
+    if workflow:
         script_path = f"{workflow.work_dir}/script.txt" if workflow.work_dir else None
         if script_path and os.path.exists(script_path):
             with open(script_path, "r", encoding="utf-8") as f:
@@ -709,18 +695,57 @@ def run_workflow_ui(video_url, tts_voice, proxy_url=""):
         if workflow.audio_path and os.path.exists(workflow.audio_path):
             audio_path = workflow.audio_path
 
-        yield ["\n".join(logs), script_content, video_path, audio_path, None]
+    return [log_text, script_content, video_path, audio_path, None]
 
-    script_path = f"{workflow.work_dir}/script.txt" if workflow.work_dir else None
-    if script_path and os.path.exists(script_path):
-        with open(script_path, "r", encoding="utf-8") as f:
-            script_content = f.read()
-    if workflow.final_video and os.path.exists(workflow.final_video):
-        video_path = workflow.final_video
-    if workflow.audio_path and os.path.exists(workflow.audio_path):
-        audio_path = workflow.audio_path
 
-    yield ["\n".join(logs), script_content, video_path, audio_path, None]
+def run_workflow_ui(video_url, tts_voice, proxy_url=""):
+    """Gradio 接口: 实时流式输出日志"""
+    if not video_url or not video_url.strip():
+        yield ["请输入 YouTube 视频链接", None, None, None, None]
+        return
+
+    video_url = video_url.strip()
+    proxy_url = proxy_url.strip()
+
+    log_queue = queue.Queue()
+    workflow_container = {"obj": None}
+
+    def emit(msg):
+        log_queue.put(msg)
+
+    def worker():
+        try:
+            wf = VideoWorkflow(video_url, tts_voice)
+            if proxy_url:
+                wf.proxy = proxy_url
+            for _ in wf.run(emit):
+                workflow_container["obj"] = wf
+            workflow_container["obj"] = wf
+        except Exception as e:
+            emit(f"❌ 工作流异常: {e}")
+        finally:
+            log_queue.put(None)  # sentinel
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    logs = []
+    while True:
+        try:
+            msg = log_queue.get(timeout=0.3)
+        except queue.Empty:
+            # 没新日志但工作流还没结束 → yield 保持连接活跃
+            yield _build_outputs("\n".join(logs), workflow_container["obj"], extract_video_id(video_url))
+            continue
+
+        if msg is None:  # sentinel → 工作流结束
+            break
+
+        logs.append(msg)
+        yield _build_outputs("\n".join(logs), workflow_container["obj"], extract_video_id(video_url))
+
+    # 最终输出
+    yield _build_outputs("\n".join(logs), workflow_container["obj"], extract_video_id(video_url))
 
 
 # ============ UI 构建 ============
