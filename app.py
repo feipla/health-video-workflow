@@ -129,6 +129,8 @@ class VideoWorkflow:
         self.final_video = None
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
         self.whiteboard_clips = []  # 白板动画片段路径列表
+        # 代理配置：优先使用 UI 传入的 proxy，其次环境变量 HTTP_PROXY
+        self.proxy = os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
     def step1_fetch_info(self, progress_callback):
         """Step 1: 获取 YouTube 视频信息"""
@@ -140,8 +142,14 @@ class VideoWorkflow:
 
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
-        ok, info_json = run_cmd([
-            "yt-dlp", "--dump-json", "--skip-download",
+        # 构建 yt-dlp 基础命令
+        ytdlp_base = ["yt-dlp"]
+        if self.proxy:
+            ytdlp_base += ["--proxy", self.proxy]
+            progress_callback(log(f"   使用代理: {self.proxy[:30]}..."))
+
+        ok, info_json = run_cmd(ytdlp_base + [
+            "--dump-json", "--skip-download",
             "--write-thumbnail",
             self.video_url
         ], cwd=self.work_dir)
@@ -181,8 +189,12 @@ class VideoWorkflow:
         progress_callback(log("Step 2/6: 正在下载音频..."))
 
         audio_path = f"{self.work_dir}/audio.mp3"
-        ok, msg = run_cmd([
-            "yt-dlp", "-f", "bestaudio", "--extract-audio",
+        # 复用 proxy 配置
+        ytdlp_base = ["yt-dlp"]
+        if self.proxy:
+            ytdlp_base += ["--proxy", self.proxy]
+        ok, msg = run_cmd(ytdlp_base + [
+            "-f", "bestaudio", "--extract-audio",
             "--audio-format", "mp3", "--audio-quality", "0",
             "-o", audio_path, self.video_url
         ])
@@ -657,13 +669,14 @@ class VideoWorkflow:
 
 # ============ Gradio Web 界面 ============
 
-def run_workflow_ui(video_url, tts_voice):
+def run_workflow_ui(video_url, tts_voice, proxy_url=""):
     """Gradio 接口: 运行工作流并返回日志和结果"""
     if not video_url or not video_url.strip():
-        yield ["请输入 YouTube 视频链接", None, None, None]
+        yield ["请输入 YouTube 视频链接", None, None, None, None]
         return
 
     video_url = video_url.strip()
+    proxy_url = proxy_url.strip()
     logs = []
     script_content = ""
     video_path = None
@@ -675,22 +688,21 @@ def run_workflow_ui(video_url, tts_voice):
         return "\n".join(logs)
 
     workflow = VideoWorkflow(video_url, tts_voice)
+    if proxy_url:
+        workflow.proxy = proxy_url
 
     for _ in workflow.run(emit):
-        # 每次迭代返回当前状态
-        # 读取脚本预览
         script_path = f"{workflow.work_dir}/script.txt" if workflow.work_dir else None
         if script_path and os.path.exists(script_path):
             with open(script_path, "r", encoding="utf-8") as f:
-                script_content = f.read()[:2000]  # 预览前2000字
+                script_content = f.read()[:2000]
         if workflow.final_video and os.path.exists(workflow.final_video):
             video_path = workflow.final_video
         if workflow.audio_path and os.path.exists(workflow.audio_path):
             audio_path = workflow.audio_path
 
-        yield ["\n".join(logs), script_content, video_path, audio_path]
+        yield ["\n".join(logs), script_content, video_path, audio_path, None]
 
-    # 最终结果
     script_path = f"{workflow.work_dir}/script.txt" if workflow.work_dir else None
     if script_path and os.path.exists(script_path):
         with open(script_path, "r", encoding="utf-8") as f:
@@ -700,7 +712,7 @@ def run_workflow_ui(video_url, tts_voice):
     if workflow.audio_path and os.path.exists(workflow.audio_path):
         audio_path = workflow.audio_path
 
-    yield ["\n".join(logs), script_content, video_path, audio_path]
+    yield ["\n".join(logs), script_content, video_path, audio_path, None]
 
 
 # ============ UI 构建 ============
@@ -740,6 +752,12 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
                 type="value",
             )
 
+            proxy_url = gr.Textbox(
+                label="🌐 代理地址（可选，国内访问YouTube需要）",
+                placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080",
+                lines=1,
+            )
+
             run_btn = gr.Button("🚀 开始生成", variant="primary", size="lg")
 
             gr.Markdown("""
@@ -747,8 +765,9 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
             ### 💡 说明
             1. 粘贴 YouTube 健康视频链接
             2. 选择配音声音
-            3. 点击"开始生成"
-            4. 等待处理完成（约 5-15 分钟）
+            3. 如有代理工具，填代理地址（国内访问YouTube必备）
+            4. 点击"开始生成"
+            5. 等待处理完成（约 10-20 分钟）
 
             ### 🔑 API Key（可选）
             设置环境变量 `LLM_API_KEY` 可使用 DeepSeek AI 生成高质量脚本。
@@ -791,28 +810,28 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
             status_text = gr.Markdown("🟢 就绪，等待输入...")
 
     # 事件绑定
-    def on_submit(url, voice):
+    def on_submit(url, voice, proxy):
         if not url or not url.strip():
             yield [None, "请输入 YouTube 视频链接", None, None, None, "🔴 错误: 链接为空"]
             return
 
-        # 验证是否是有效的 YouTube 链接
         vid = extract_video_id(url.strip())
         if not vid:
             yield [None, "❌ 无效的 YouTube 链接，请检查格式", None, None, None, "🔴 错误: 链接格式不正确"]
             return
 
-        yield [None, "🟡 工作流启动中...", None, None, None, "🟡 处理中..."]
+        if proxy and proxy.strip():
+            yield [None, f"🟡 工作流启动中（使用代理）...", None, None, None, "🟡 处理中..."]
+        else:
+            yield [None, "🟡 工作流启动中（无代理）...", None, None, None, "🟡 处理中..."]
 
-        for logs, script, video, audio in run_workflow_ui(url.strip(), voice):
-            # 检查是否完成
+        for logs, script, video, audio, _ in run_workflow_ui(url.strip(), voice, proxy.strip() if proxy else ""):
             is_done = "全部完成" in logs
             status = "🟢 完成! ✅" if is_done else "🟡 处理中..."
             script_file = None
             audio_file = None
 
             if script:
-                # 保存脚本为可下载文件
                 script_file_path = f"{TEMP_BASE}/script_preview.txt"
                 with open(script_file_path, "w", encoding="utf-8") as f:
                     f.write(script)
@@ -825,7 +844,7 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
 
     run_btn.click(
         fn=on_submit,
-        inputs=[video_url, tts_voice],
+        inputs=[video_url, tts_voice, proxy_url],
         outputs=[
             video_output,
             log_output,
