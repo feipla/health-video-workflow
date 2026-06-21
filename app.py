@@ -82,14 +82,14 @@ def log(msg):
     return f"[{ts}] {msg}"
 
 def run_cmd(cmd, cwd=None, timeout=300):
-    """运行 shell 命令并返回输出"""
+    """运行 shell 命令并返回完整输出"""
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout
         )
         if result.returncode != 0:
             return False, result.stderr[:500]
-        return True, result.stdout[:500]
+        return True, result.stdout
     except subprocess.TimeoutExpired:
         return False, "命令执行超时"
     except Exception as e:
