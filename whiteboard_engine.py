@@ -18,6 +18,22 @@ _SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 _ASSETS_DIR = _SCRIPT_DIR / "assets"
 HAND_PATH = str(_ASSETS_DIR / "drawing-hand.png")
 
+
+# === 兼容中文路径的图片读取 ===
+
+def _imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """支持中文路径的 cv2.imread 替代（Windows 上用 np.fromfile 绕过 fopen 限制）"""
+    try:
+        if not os.path.exists(path):
+            return None
+        # 用 numpy 读取文件字节，再用 cv2 解码（支持 Unicode 路径）
+        with open(path, "rb") as f:
+            arr = np.frombuffer(f.read(), dtype=np.uint8)
+        img = cv2.imdecode(arr, flags)
+        return img
+    except Exception:
+        return None
+
 # === 固定算法参数 ===
 FRAME_RATE = 60  # 输出视频帧率；越高越流畅，文件体积和生成帧数也会增加
 SPLIT_LEN = 10  # 网格切分边长（像素）；越小绘制越细，计算量越大
@@ -93,7 +109,10 @@ def preprocess_image(img, variables):
 
 
 def preprocess_hand_image(hand_path, variables):
-    hand_rgba = cv2.imread(hand_path, cv2.IMREAD_UNCHANGED)
+    hand_rgba = _imread_unicode(hand_path, cv2.IMREAD_UNCHANGED)
+    if hand_rgba is None:
+        print(f"错误: 无法读取手部素材: {hand_path}")
+        sys.exit(1)
     if hand_rgba.shape[2] == 4:
         # 透明背景 PNG：直接从 alpha 通道提取蒙版
         hand_mask = hand_rgba[:, :, 3]
@@ -1367,7 +1386,7 @@ def main():
 
     # 读取图片
     print(f"\n读取图片: {image_path}")
-    image_bgr = cv2.imread(image_path)
+    image_bgr = _imread_unicode(image_path)
     if image_bgr is None:
         print(f"错误: 无法读取图片: {image_path}")
         sys.exit(1)

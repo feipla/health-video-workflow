@@ -511,6 +511,17 @@ class VideoWorkflow:
                 "--duration", str(draw_duration),
             ], timeout=300)
 
+            # 如果失败且包含手部素材相关错误，尝试不加手部
+            if not ok and ("hand" in msg.lower() or "手部" in msg or "NoneType" in msg):
+                progress_callback(log(f"   手部素材加载失败，尝试无手模式..."))
+                ok, msg = run_cmd([
+                    sys.executable, WHITEBOARD_GEN_SCRIPT,
+                    img_path,
+                    "--output-dir", whiteboard_dir,
+                    "--duration", str(draw_duration),
+                    "--no-hand",
+                ], timeout=300)
+
             if ok:
                 # 查找生成的视频文件
                 clip_files = sorted(Path(whiteboard_dir).glob("vid_*.mp4"))
