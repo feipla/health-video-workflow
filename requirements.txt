@@ -1,0 +1,12 @@
+yt-dlp>=2024.1.1
+edge-tts>=6.1.0
+openai-whisper>=20231117
+gradio>=4.0,<7.0
+requests>=2.31.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+av>=10.0.0
+Pillow>=10.0.0
+
+# 系统依赖（ModelScope 会通过 apt 安装）
+ffmpeg
