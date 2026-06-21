@@ -480,7 +480,9 @@ class VideoWorkflow:
                 clip_files = sorted(Path(whiteboard_dir).glob("vid_*.mp4"))
                 if clip_files:
                     latest = str(clip_files[-1])
-                    # 重命名为有序名称
+                    # 重命名为有序名称（Windows 用 replace 替代 rename 避免文件已存在错误）
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
                     os.rename(latest, output_path)
                     self.whiteboard_clips.append(output_path)
                     progress_callback(log(f"   ✅ 白板动画片段 {idx+1} 完成"))
@@ -488,7 +490,7 @@ class VideoWorkflow:
                     # 还需要一个停留片段（展示完整信息图）
                     hold_path = f"{whiteboard_dir}/hold_{idx+1:02d}.mp4"
                     hold_duration = max(duration_ms - draw_duration, 2000)  # 最少2秒
-                    ok2, _ = run_cmd([
+                    ok2, msg2 = run_cmd([
                         "ffmpeg", "-y",
                         "-loop", "1",
                         "-i", img_path,
@@ -501,12 +503,14 @@ class VideoWorkflow:
                         hold_path
                     ], timeout=60)
 
-                    if ok2:
+                    if ok2 and os.path.exists(hold_path):
                         self.whiteboard_clips.append(hold_path)
+                    else:
+                        progress_callback(log(f"   ⚠️ 停留片段生成失败: {msg2[:200]}"))
                 else:
-                    progress_callback(log(f"   ⚠️ 未找到白板动画输出文件"))
+                    progress_callback(log(f"   ⚠️ 未找到白板动画输出文件: {msg[:200]}"))
             else:
-                progress_callback(log(f"   ⚠️ 白板动画失败，使用静态图替代"))
+                progress_callback(log(f"   ⚠️ 白板动画失败: {msg[:200]}，使用静态图替代"))
 
         if not self.whiteboard_clips:
             progress_callback(log("⚠️ 所有白板动画均失败"))
@@ -530,15 +534,19 @@ class VideoWorkflow:
             with open(srt_path, "w", encoding="utf-8") as f:
                 f.write(vtt_content.replace("WEBVTT\n\n", ""))
 
-        # 如果有白板动画片段，使用 concat 拼接
-        if self.whiteboard_clips:
-            progress_callback(log("   拼接白板动画片段..."))
+        # 检查白板动画片段是否存在
+        clips_exist = [c for c in self.whiteboard_clips if os.path.exists(c)]
+        if not clips_exist:
+            progress_callback(log("⚠️ 白板动画片段文件不存在，使用降级方案"))
+        else:
+            progress_callback(log(f"   白板动画片段: {len(clips_exist)} 个文件正常"))
 
-            # 创建 concat 文件列表
+            # 创建 concat 文件列表（Windows 路径用正斜杠）
             concat_file = f"{self.work_dir}/concat_list.txt"
             with open(concat_file, "w") as f:
-                for clip in self.whiteboard_clips:
-                    f.write(f"file '{clip}'\n")
+                for clip in clips_exist:
+                    path_fwd = clip.replace("\\", "/")
+                    f.write(f"file '{path_fwd}'\n")
 
             # 先拼接所有视频片段（无音频）
             concat_video = f"{self.work_dir}/concat_video.mp4"
@@ -583,12 +591,13 @@ class VideoWorkflow:
                         output_video
                     ]
 
+                progress_callback(log("   正在合成视频+音频+字幕..."))
                 ok, msg = run_cmd(cmd, timeout=300)
                 if not ok:
-                    progress_callback(log("⚠️ 视频+音频合成失败，使用纯色背景方案"))
+                    progress_callback(log(f"⚠️ 视频+音频合成失败: {msg[:300]}"))
                     ok = False
             else:
-                progress_callback(log("⚠️ 视频拼接失败，使用纯色背景方案"))
+                progress_callback(log(f"⚠️ 视频拼接失败 (ffmpeg concat): {msg[:300]}"))
                 ok = False
 
             if ok and os.path.exists(output_video):
