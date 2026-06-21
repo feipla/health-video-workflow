@@ -132,6 +132,17 @@ class VideoWorkflow:
         # 代理配置：优先使用 UI 传入的 proxy，其次环境变量 HTTP_PROXY
         self.proxy = os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
+    def _proxy_args(self):
+        """构建 yt-dlp 代理参数，自动补全协议前缀"""
+        proxy = self.proxy.strip()
+        if not proxy:
+            return []
+        # 自动补全 http:// 前缀
+        if not proxy.startswith("http://") and not proxy.startswith("socks5://") and not proxy.startswith("socks4://"):
+            proxy = "http://" + proxy
+            self.proxy = proxy
+        return ["--proxy", proxy]
+
     def step1_fetch_info(self, progress_callback):
         """Step 1: 获取 YouTube 视频信息"""
         progress_callback(log("Step 1/6: 正在获取视频信息..."))
@@ -143,9 +154,8 @@ class VideoWorkflow:
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
         # 构建 yt-dlp 基础命令
-        ytdlp_base = ["yt-dlp"]
+        ytdlp_base = ["yt-dlp"] + self._proxy_args()
         if self.proxy:
-            ytdlp_base += ["--proxy", self.proxy]
             progress_callback(log(f"   使用代理: {self.proxy[:30]}..."))
 
         ok, info_json = run_cmd(ytdlp_base + [
@@ -190,9 +200,7 @@ class VideoWorkflow:
 
         audio_path = f"{self.work_dir}/audio.mp3"
         # 复用 proxy 配置
-        ytdlp_base = ["yt-dlp"]
-        if self.proxy:
-            ytdlp_base += ["--proxy", self.proxy]
+        ytdlp_base = ["yt-dlp"] + self._proxy_args()
         ok, msg = run_cmd(ytdlp_base + [
             "-f", "bestaudio", "--extract-audio",
             "--audio-format", "mp3", "--audio-quality", "0",
@@ -753,8 +761,8 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
             )
 
             proxy_url = gr.Textbox(
-                label="🌐 代理地址（可选，国内访问YouTube需要）",
-                placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080",
+                label="🌐 代理地址（国内访问YouTube必填）",
+                placeholder="http://你的代理服务器IP:端口 或 socks5://IP:端口 (不能填127.0.0.1)",
                 lines=1,
             )
 
