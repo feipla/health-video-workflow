@@ -118,9 +118,10 @@ def clean_old_outputs(max_dirs=10):
 class VideoWorkflow:
     """视频工作流，带进度回调"""
 
-    def __init__(self, video_url, tts_voice="zh-CN-XiaoxiaoNeural"):
+    def __init__(self, video_url, tts_voice="zh-CN-XiaoxiaoNeural", short_mode=False):
         self.video_url = video_url
         self.tts_voice = tts_voice
+        self.short_mode = short_mode
         self.video_id = extract_video_id(video_url)
         self.work_dir = f"{OUTPUT_BASE}/{self.video_id}" if self.video_id else None
         self.metadata = None
@@ -265,6 +266,15 @@ class VideoWorkflow:
 
     def _step3_with_api(self, progress_callback):
         """使用 DeepSeek API 生成脚本"""
+        if self.short_mode:
+            word_goal = "350-450 个中文字（不含标点）。这个字数配音后正好是 2 分钟左右。"
+            time_desc = "2分钟"
+            max_tok = 800
+        else:
+            word_goal = "950-1150 个中文字（不含标点）。这个字数配音后正好是 5-7 分钟。"
+            time_desc = "5-7分钟"
+            max_tok = 2000
+
         prompt = f"""你是一位专业的健康科普视频脚本创作者。请根据以下YouTube视频的内容,创作一段适合中国受众的中文科普视频脚本。
 
 【原始视频信息】
@@ -276,21 +286,20 @@ class VideoWorkflow:
 {self.transcript[:3000]}
 
 【创作要求 - 必须严格遵守】
-1. 字数: 严格控制在 950-1150 个中文字（不含标点）。这个字数配音后正好是 5-7 分钟。
+1. 字数: 严格控制在 {word_goal}
 2. 风格: 通俗易懂,像朋友聊天一样,避免学术腔
 3. 结构:
-   - 开头(约150字, 45秒): 用一个问题或场景引入,抓住观众注意力
-   - 正文(约700-850字, 4-5分钟): 分3-4个要点,每个要点先讲核心理念,再讲科学依据
-   - 结尾(约100-150字, 30-45秒): 总结+1-2个可立即执行的实操建议
+   - 开头(约1-2句): 用一个问题或场景引入,抓住观众注意力
+   - 正文(约2-3个要点): 每个要点先讲核心理念,再讲科学依据
+   - 结尾(约1-2句): 总结+实操建议
 4. 语言: 中文口语化,适合视频配音,句子要短
 5. 合规:
    - 只讲健康生活方式建议,不涉及疾病诊断或治疗
    - 避免绝对化表述("一定""绝对""100%")
-   - 涉及的研究数据要标注来源
    - 结尾必须加免责声明
 6. 格式: 直接输出脚本正文,每段开头标注 [预计时长]
 
-请直接输出脚本内容,严格控制字数在 950-1150 字之间。"""
+请直接输出脚本内容,严格控制字数在 {word_goal}"""
 
         req_data = json.dumps({
             "model": "deepseek-chat",
@@ -299,7 +308,7 @@ class VideoWorkflow:
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.7,
-            "max_tokens": 2000
+            "max_tokens": max_tok
         }).encode("utf-8")
 
         req = urllib.request.Request(
@@ -324,13 +333,30 @@ class VideoWorkflow:
             f.write(self.script)
 
         char_count = len(self.script)
+        expected = "约2分钟" if self.short_mode else "5-7分钟"
         progress_callback(log(f"✅ 脚本生成完成! 约 {char_count} 字符"))
-        progress_callback(log("   ⏱ 预计配音时长: 5-7 分钟"))
+        progress_callback(log(f"   ⏱ 预计配音时长: {expected}"))
         return True
 
     def _step3_local(self, progress_callback):
         """本地模板（无 API Key 时使用）"""
-        self.script = f"""【开头 - 45秒】
+        if self.short_mode:
+            self.script = """【开头】
+你知道吗？一些研究发现，小小的日常改变就能给健康带来巨大的影响。
+
+【要点1 - 核心发现】
+科学研究表明，这个问题比我们想象的重要得多。长期观察发现，那些注意这方面的人，健康状况明显更好。
+
+【要点2 - 如何做】
+好消息是，改善这个问题并不需要复杂的方案。只需要从今天开始，做出一个小小的调整就可以了。
+
+【结尾】
+总结一下，今天的关键信息就是：小改变，大不同。如果觉得有用，不妨试试看。
+
+【免责声明】
+本视频内容仅供健康科普参考，不构成任何医疗诊断或治疗建议。"""
+        else:
+            self.script = f"""【开头 - 45秒】
 大家好,今天我们来聊一个和每个人健康息息相关的话题。看完这期视频,你会对这个问题有一个全新的认识。
 
 【要点1 - 90秒】
@@ -385,11 +411,12 @@ class VideoWorkflow:
             f.write(clean_text)
 
         self.audio_path = f"{self.work_dir}/voice.mp3"
-        progress_callback(log("   正在合成语音 (Edge TTS, 约1-3分钟)..."))
+        tts_rate = "+10%" if self.short_mode else "+0%"
+        progress_callback(log(f"   正在合成语音 (Edge TTS{', 加速模式' if self.short_mode else ''})..."))
 
         ok, msg = run_cmd([
             "edge-tts", "--file", clean_path,
-            "--voice", self.tts_voice, "--rate", "+0%",
+            "--voice", self.tts_voice, "--rate", tts_rate,
             "--write-media", self.audio_path,
             "--write-subtitles", f"{self.work_dir}/voice_subtitles.vtt"
         ], timeout=120)
@@ -433,6 +460,15 @@ class VideoWorkflow:
         if not infographics:
             progress_callback(log("⚠️ 信息图生成失败，使用备用纯色背景"))
             return False
+
+        # 短模式：缩放每张信息图展示时长，总长约 2 分钟
+        if self.short_mode:
+            total_dur = sum(d for _, d in infographics) / 1000  # 秒
+            target = 110  # 目标总时长约 110 秒（留 10 秒给白板动画开销）
+            if total_dur > target:
+                scale = target / total_dur
+                infographics = [(p, int(d * scale)) for p, d in infographics]
+                progress_callback(log(f"   ⏱ 短模式缩放: x{scale:.2f}"))
 
         progress_callback(log(f"✅ 生成 {len(infographics)} 张信息图"))
         for path, dur in infographics:
@@ -707,7 +743,7 @@ def _build_outputs(log_text, workflow, video_id):
     return [log_text, script_content, video_path, audio_path, None]
 
 
-def run_workflow_ui(video_url, tts_voice, proxy_url=""):
+def run_workflow_ui(video_url, tts_voice, proxy_url="", short_mode=False):
     """Gradio 接口: 实时流式输出日志"""
     if not video_url or not video_url.strip():
         yield ["请输入 YouTube 视频链接", None, None, None, None]
@@ -724,7 +760,7 @@ def run_workflow_ui(video_url, tts_voice, proxy_url=""):
 
     def worker():
         try:
-            wf = VideoWorkflow(video_url, tts_voice)
+            wf = VideoWorkflow(video_url, tts_voice, short_mode=short_mode)
             if proxy_url:
                 wf.proxy = proxy_url
             for _ in wf.run(emit):
@@ -800,6 +836,13 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
                 lines=1,
             )
 
+            with gr.Row():
+                short_mode = gr.Checkbox(
+                    label="⚡ 测试模式（约2分钟短视频）",
+                    value=False,
+                    info="勾选后生成短脚本+快语速，快速验证流程",
+                )
+
             run_btn = gr.Button("🚀 开始生成", variant="primary", size="lg")
 
             gr.Markdown("""
@@ -852,7 +895,7 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
             status_text = gr.Markdown("🟢 就绪，等待输入...")
 
     # 事件绑定
-    def on_submit(url, voice, proxy):
+    def on_submit(url, voice, proxy, short):
         if not url or not url.strip():
             yield [None, "请输入 YouTube 视频链接", None, None, None, "🔴 错误: 链接为空"]
             return
@@ -862,12 +905,13 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
             yield [None, "❌ 无效的 YouTube 链接，请检查格式", None, None, None, "🔴 错误: 链接格式不正确"]
             return
 
+        mode = "⚡测试" if short else "完整"
         if proxy and proxy.strip():
-            yield [None, f"🟡 工作流启动中（使用代理）...", None, None, None, "🟡 处理中..."]
+            yield [None, f"🟡 {mode}模式启动中（使用代理）...", None, None, None, "🟡 处理中..."]
         else:
-            yield [None, "🟡 工作流启动中（无代理）...", None, None, None, "🟡 处理中..."]
+            yield [None, f"🟡 {mode}模式启动中（无代理）...", None, None, None, "🟡 处理中..."]
 
-        for logs, script, video, audio, _ in run_workflow_ui(url.strip(), voice, proxy.strip() if proxy else ""):
+        for logs, script, video, audio, _ in run_workflow_ui(url.strip(), voice, proxy.strip() if proxy else "", short_mode=short):
             is_done = "全部完成" in logs
             status = "🟢 完成! ✅" if is_done else "🟡 处理中..."
             script_file = None
@@ -886,7 +930,7 @@ with gr.Blocks(title="泛健康视频自动化工作流") as demo:
 
     run_btn.click(
         fn=on_submit,
-        inputs=[video_url, tts_voice, proxy_url],
+        inputs=[video_url, tts_voice, proxy_url, short_mode],
         outputs=[
             video_output,
             log_output,
