@@ -83,11 +83,18 @@ def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     return f"[{ts}] {msg}"
 
-def run_cmd(cmd, cwd=None, timeout=300):
+def run_cmd(cmd, cwd=None, timeout=300, extra_env=None, no_proxy=False):
     """运行 shell 命令并返回完整输出"""
     try:
+        env = os.environ.copy()
+        if no_proxy:
+            for k in list(env.keys()):
+                if "proxy" in k.lower():
+                    del env[k]
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout
+            cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, env=env
         )
         if result.returncode != 0:
             return False, result.stderr[:500]
@@ -419,7 +426,7 @@ class VideoWorkflow:
             "--voice", self.tts_voice, "--rate", tts_rate,
             "--write-media", self.audio_path,
             "--write-subtitles", f"{self.work_dir}/voice_subtitles.vtt"
-        ], timeout=120)
+        ], timeout=120, no_proxy=True)
 
         if not ok or not os.path.exists(self.audio_path):
             progress_callback(log(f"❌ 配音生成失败: {msg}"))
