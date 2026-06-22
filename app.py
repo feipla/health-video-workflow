@@ -97,7 +97,7 @@ def run_cmd(cmd, cwd=None, timeout=300, extra_env=None, no_proxy=False):
             cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, env=env
         )
         if result.returncode != 0:
-            return False, result.stderr[:500]
+            return False, result.stderr[:2000]
         return True, result.stdout
     except subprocess.TimeoutExpired:
         return False, "命令执行超时"
@@ -595,15 +595,32 @@ class VideoWorkflow:
         else:
             progress_callback(log(f"   白板动画片段: {len(clips_exist)} 个文件正常"))
 
-            # 创建 concat 文件列表（Windows 路径用正斜杠）
-            concat_file = f"{self.work_dir}/concat_list.txt"
-            with open(concat_file, "w") as f:
-                for clip in clips_exist:
+            # 由于用户项目路径包含中文（如 D:\AI之旅\...），
+            # ffmpeg 在 Windows 上通过 fopen() 无法正确处理中文路径。
+            # 方案：把视频片段复制到 TEMP 目录（纯英文路径）再拼接
+            safe_tmp = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", "C:\\temp")),
+                                    f"hvw_concat_{self.video_id}")
+            # 用视频 ID 的最后几位避免过长路径
+            safe_dir = safe_tmp[:120]  # 防止路径超长
+            os.makedirs(safe_dir, exist_ok=True)
+
+            # 复制片段到安全目录
+            safe_clips = []
+            for i, clip in enumerate(clips_exist):
+                dst = os.path.join(safe_dir, f"clip_{i:02d}.mp4")
+                if not os.path.exists(dst):
+                    shutil.copy2(clip, dst)
+                safe_clips.append(dst)
+
+            # 创建 concat 文件列表
+            concat_file = os.path.join(safe_dir, "concat_list.txt")
+            with open(concat_file, "w", encoding="utf-8") as f:
+                for clip in safe_clips:
                     path_fwd = clip.replace("\\", "/")
                     f.write(f"file '{path_fwd}'\n")
 
             # 先拼接所有视频片段（无音频）
-            concat_video = f"{self.work_dir}/concat_video.mp4"
+            concat_video = os.path.join(safe_dir, "concat_video.mp4")
             ok, msg = run_cmd([
                 "ffmpeg", "-y",
                 "-f", "concat",
@@ -616,38 +633,55 @@ class VideoWorkflow:
             ], timeout=300)
 
             if ok and os.path.exists(concat_video):
-                # 叠加音频和字幕
+                # 叠加音频和字幕（用 safe_dir 避免中文路径问题）
+                final_in_safe = os.path.join(safe_dir, "final_video.mp4")
+
+                # 字幕和音频文件也可能在中文路径下，复制到 safe_dir
+                safe_srt = os.path.join(safe_dir, "subtitle.srt")
                 if os.path.exists(srt_path):
-                    srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+                    shutil.copy2(srt_path, safe_srt)
+                    srt_for_ffmpeg = safe_srt.replace("\\", "/").replace(":", "\\:")
+                else:
+                    srt_for_ffmpeg = None
+
+                safe_audio = os.path.join(safe_dir, "voice.mp3")
+                if self.audio_path and os.path.exists(self.audio_path):
+                    shutil.copy2(self.audio_path, safe_audio)
+                else:
+                    safe_audio = None
+
+                if srt_for_ffmpeg and safe_audio:
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", concat_video,
-                        "-i", self.audio_path,
+                        "-i", safe_audio,
                         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
                         "-vf",
-                        f"subtitles={srt_escaped}:"
+                        f"subtitles={srt_for_ffmpeg}:"
                         f"force_style='FontName=Noto Sans CJK SC,FontSize=28,"
                         f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2'",
                         "-shortest",
                         "-movflags", "+faststart",
-                        output_video
+                        final_in_safe
                     ]
-                else:
+                elif safe_audio:
                     cmd = [
                         "ffmpeg", "-y",
                         "-i", concat_video,
-                        "-i", self.audio_path,
+                        "-i", safe_audio,
                         "-c:v", "copy",
                         "-c:a", "aac", "-b:a", "192k",
                         "-shortest",
                         "-movflags", "+faststart",
-                        output_video
+                        final_in_safe
                     ]
 
                 progress_callback(log("   正在合成视频+音频+字幕..."))
                 ok, msg = run_cmd(cmd, timeout=300)
-                if not ok:
+                if ok and os.path.exists(final_in_safe):
+                    shutil.copy2(final_in_safe, output_video)
+                else:
                     progress_callback(log(f"⚠️ 视频+音频合成失败: {msg[:300]}"))
                     ok = False
             else:
